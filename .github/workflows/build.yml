@@ -72,7 +72,20 @@ jobs:
           VERSION=$(ls ./build/tiktok-revanced-v*-arm-v7a.apk | head -n 1 | sed -n 's/.*tiktok-revanced-v\([0-9.]*\)-arm.*/\1/p')
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Check for existing release
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release list | awk -F '\t' '{print $1}' | grep -q "| v${{ steps.extract_version.outputs.VERSION }}$"; then
+            echo "Release with version ${{ steps.extract_version.outputs.VERSION }} already exists. Skipping new release."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Upload modules to release
+        if: steps.check_release.outputs.skip == 'false'
         uses: svenstaro/upload-release-action@v2
         with:
           body: ${{ steps.get_output.outputs.BUILD_LOG }}
@@ -84,6 +97,7 @@ jobs:
           overwrite: true
 
       - name: Update changelog and Magisk update json
+        if: steps.check_release.outputs.skip == 'false'
         id: update_config
         run: |
           git checkout -f update || git switch --discard-changes --orphan update
@@ -113,6 +127,7 @@ jobs:
           find . -name "*-update.json" | grep . || : >dummy-update.json
 
       - uses: stefanzweifel/git-auto-commit-action@v5
+        if: steps.check_release.outputs.skip == 'false'
         with:
           branch: update
           skip_checkout: true
@@ -120,9 +135,9 @@ jobs:
           commit_message: Bump version ${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}
 
       - name: Report to Telegram
+        if: steps.check_release.outputs.skip == 'false' && env.TG_TOKEN != null
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
-        if: env.TG_TOKEN != null
         run: |
           cd build || { echo "build folder not found"; exit 1; }
 
