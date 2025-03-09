@@ -1,5 +1,4 @@
 enable-magisk-update = false   # set this to false if you do not want to receive updates for the module in magisk app
-patches-version = "v5.4.0"
 
 # add 'enabled = false' for not patching a specific app or remove it from the config
 # see https://github.com/j-hc/revanced-magisk-module/blob/main/CONFIG.md for more detailed explanations
@@ -7,7 +6,7 @@ patches-version = "v5.4.0"
 # you can use rvmm-config-gen to generate a config
 
 [Tiktok]
+version = "auto"
 apkmirror-dlurl = "https://apkmirror.com/apk/tiktok-pte-ltd/tik-tok-including-musical-ly/"
 included-patches = "'SIM spoof'"
-version = "auto"
 arch = "both"
