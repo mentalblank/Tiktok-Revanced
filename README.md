@@ -1,23 +1,32 @@
-# TikTok - De-Vanced (Auto-Build)
+# TikTok - IcySymmetra & NexAlloy (Auto-Build)
 
-## Installation:
+Two patched builds of TikTok, made with different tooling. Both are published in every release.
+
+| APK | Source | Tooling | Built against |
+| --- | --- | --- | --- |
+| `tiktok-icysymmetra-…` | [tiktok-patches-for-morphe](https://github.com/icysymmetra/tiktok-patches-for-morphe) | Morphe | 46.2.3 |
+| `tiktok-nexalloy-…` | [SexAlloy](https://github.com/gnadgnaoh/SexAlloy) | LSPatch | whatever version is current |
+
+Each is a universal APK covering `arm64-v8a` and `armeabi-v7a`, so there is nothing to choose between.
+
+The IcySymmetra build is patched the usual way: the patches are compiled into the APK and target one specific TikTok version. The NexAlloy build instead embeds an Xposed module into the APK with [LSPatch](https://github.com/JingMatrix/LSPatch), so it hooks at runtime and is not tied to a TikTok version — but it carries fewer changes.
+
+## Installation
 
 1. Install the latest version of [Build APK](https://github.com/MentalBlank/Tiktok-Revanced/releases/latest).
 2. Use [Obtainium](https://github.com/ImranR98/Obtainium) to download and install build updates.
 
-## Patches:
+Neither build needs root or a separate LSPosed install; the NexAlloy build has the module loader injected into it.
 
-- Remove download restrictions and change the default download path.
-- Remember the clear display configurations between videos.
-- Show a progress bar for all videos.
-- Enable the playback speed option for all videos and retain speed configurations between videos.
-- Remove ads, livestreams, stories, image videos, and videos with a specific amount of views or likes from the feed.
-- Add ReVanced settings to TikTok.
-- Spoof the information retrieved from the SIM card.
-- Disable login requirement.
-- Fix Google login and allow logging in with a Google account.
+## Patches
 
-## Disclaimer:
+**IcySymmetra** — Hide CAPTCHA popups · Feed filter · Disable screen capture detection · Remember clear display · Downloads · Stop video looping · Custom offline videos limit · Always show publish date · Disable long-press quick share · Disable long-press repost · Hide quick comment reactions · Resume videos after scrolling · Enable non-personalized search · Enable Live search · Show seekbar · Show seekbar thumbnail · Hold-and-slide 2x lock · Playback speed · Copy comments without username · Open external links directly · Feature Gate Lab · Disable login requirement · Fix Google login · Feed tab navigation · Settings · Sanitize sharing links · SIM spoof · Translate comments · Hide floating promotions
+
+Available but off by default: Diagnostic tools.
+
+**NexAlloy** — Remove feed ads · Hide promoted music videos · Disable screen capture detection · Disable login requirement · Fix Google login · Hide CAPTCHA popups · Remove download watermark
+
+## Disclaimer
 
 This patch modifies the original APK, and may violate the app provider's terms of service. Use at your own risk.
 
@@ -27,4 +36,4 @@ This patch modifies the original APK, and may violate the app provider's terms o
 
 ## Thanks To:
 
-[j-hc](https://github.com/j-hc) & [ReVanced](https://github.com/ReVanced) & [De-ReVanced](https://github.com/RookieEnough/) & [Morphe](https://github.com/MorpheApp/)
+[j-hc](https://github.com/j-hc) & [Morphe](https://github.com/MorpheApp/) & [icysymmetra](https://github.com/icysymmetra/tiktok-patches-for-morphe) & [gnadgnaoh](https://github.com/gnadgnaoh/SexAlloy) & [LSPatch](https://github.com/JingMatrix/LSPatch)
