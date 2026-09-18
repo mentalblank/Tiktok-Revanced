@@ -349,8 +349,16 @@ cf_dl() {
 	# clearance can lapse between solving the page and fetching the file, so a
 	# rejected download is retried once against a freshly solved referer
 	for attempt in 1 2; do
+		# the clearance cookie was earned by a browser, so the request that spends
+		# it has to look like one too
 		local cargs=(-L --fail -s -S --connect-timeout 10 --retry 2 --max-time 1800
-			-H "User-Agent: ${__SOLVER_UA__:-$USER_AGENT}")
+			-H "User-Agent: ${__SOLVER_UA__:-$USER_AGENT}"
+			-H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+			-H "Accept-Language: en-US,en;q=0.9"
+			-H "Upgrade-Insecure-Requests: 1"
+			-H "Sec-Fetch-Dest: document" -H "Sec-Fetch-Mode: navigate"
+			-H "Sec-Fetch-Site: same-origin" -H "Sec-Fetch-User: ?1"
+			-H "Cache-Control: max-age=0")
 		if [ "$__SOLVER_COOKIES__" ]; then cargs+=(-H "Cookie: ${__SOLVER_COOKIES__}"); fi
 		if [ "$referer" ]; then cargs+=(-H "Referer: ${referer}"); fi
 		if curl "${cargs[@]}" -o "$dlp" "$url"; then
