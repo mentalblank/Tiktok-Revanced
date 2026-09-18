@@ -1,9 +1,7 @@
-TikTok-NexAlloy (arm64-v8a) [gnadgnaoh/SexAlloy]: 47.0.3  
-TikTok-NexAlloy (arm-v7a) [gnadgnaoh/SexAlloy]: 47.0.3  
+TikTok-NexAlloy [gnadgnaoh/SexAlloy]: 47.0.3  
 
 Failed:  
-- TikTok (arm-v7a)  
-- TikTok (arm64-v8a)  
+- TikTok  
   
 CLI: MorpheApp/morphe-desktop-1.16.0-all.jar  
 Patches: icysymmetra/patches-0.7.0.mpp  
