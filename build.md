@@ -1,8 +1,8 @@
-TikTok (arm64-v8a): 43.6.2  
-TikTok (arm-v7a): 43.6.2  
-
-Use [zygisk-detach](https://github.com/j-hc/zygisk-detach) to detach root the app from Play Store
+TikTok (arm-v7a) [icysymmetra/tiktok-patches-for-morphe]: 46.2.3  
   
-CLI: MorpheApp/morphe-cli-1.9.0-all.jar  
-Patches: RookieEnough/patches-1.0.4.mpp  
-[Changelog](https://github.com/RookieEnough/De-Vanced/releases/tag/v1.0.4)  
+CLI: MorpheApp/morphe-desktop-1.16.0-all.jar  
+Patches: icysymmetra/patches-0.7.0.mpp  
+[Changelog](https://github.com/icysymmetra/tiktok-patches-for-morphe/releases/tag/v0.7.0)
+
+LSPatch: JingMatrix/lspatch-v1.2-487-release.jar  
+Module: gnadgnaoh/NexAlloy-nonroot-release-v1.0.apk    
