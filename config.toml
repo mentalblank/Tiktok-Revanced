@@ -12,6 +12,13 @@ cli-source = "MorpheApp/morphe-cli"
 rv-brand = "IcySymmetra"
 build-mode = "apk"
 arch = "all"
+# apkmirror will not serve these older builds to a runner, so map each version
+# the patches might ask for to a direct apkpure url. apkpure keys on version
+# code, not name: 46.2.3 = 2024602030, 47.0.3 = 2024700030 (pattern is 202
+# followed by major*100000 + minor*1000 + patch*10). a version with no entry
+# here just falls through to the next source
+pkg-name = "com.zhiliaoapp.musically"
+direct-dlurl = "46.2.3=https://d.apkpure.com/b/APK/com.zhiliaoapp.musically?versionCode=2024602030 47.0.3=https://d.apkpure.com/b/APK/com.zhiliaoapp.musically?versionCode=2024700030"
 apkmirror-dlurl = "https://www.apkmirror.com/apk/tiktok-pte-ltd/tik-tok-including-musical-ly/"
 uptodown-dlurl = "https://tiktok.en.uptodown.com/android"
 apkcombo-dlurl = "https://apkcombo.com/tiktok/com.zhiliaoapp.musically"

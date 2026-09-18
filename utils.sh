@@ -5,7 +5,7 @@ CWD=$(pwd)
 TEMP_DIR="temp"
 BIN_DIR="bin"
 BUILD_DIR="build"
-DL_SRCS=("direct" "archive" "apkcombo" "uptodown" "gplay" "apkmirror")
+DL_SRCS=("archive" "apkcombo" "uptodown" "gplay" "apkmirror" "direct")
 
 if [ "${GITHUB_TOKEN-}" ]; then GH_HEADER="Authorization: token ${GITHUB_TOKEN}"; else GH_HEADER=; fi
 NEXT_VER_CODE=${NEXT_VER_CODE:-$(date +'%Y%m%d')}
@@ -713,13 +713,59 @@ get_archive_vers() { sed 's/^[^-]*-//;s/-\(all\|arm64-v8a\|arm-v7a\)\.apk//g' <<
 get_archive_pkg_name() { echo "$__ARCHIVE_PKG_NAME__"; }
 
 # -------------------- direct --------------------
+# direct-dlurl is either a single url, or space separated "<version>=<url>"
+# pairs. the pairs let a pinned build follow whatever version the patches ask
+# for, and an unlisted version simply falls through to the next source rather
+# than quietly handing back the wrong apk
+_direct_is_map() {
+	local first=${1%% *}
+	[[ $1 == *=* ]] && [[ ${first%%=*} != *[:/]* ]]
+}
+_direct_url_for() {
+	local spec=$1 want=$2 entry
+	local -a entries
+	if ! _direct_is_map "$spec"; then
+		echo "$spec"
+		return 0
+	fi
+	# read -ra splits without globbing: the urls contain '?', which nullglob
+	# would otherwise erase
+	read -ra entries <<<"$spec"
+	for entry in "${entries[@]}"; do
+		if [ "${entry%%=*}" = "$want" ]; then
+			echo "${entry#*=}"
+			return 0
+		fi
+	done
+	return 1
+}
 dl_direct() {
-	local url=$1 version=${2// /-} output=$3 arch=$4 _dpi=$5
+	local spec=$1 version=${2// /} output=$3 _arch=$4 _dpi=$5 url
+	if ! url=$(_direct_url_for "$spec" "$version"); then
+		epr "no direct url listed for version '${version}'"
+		return 1
+	fi
 	req "$url" "${output}" || return 1
 }
-get_direct_vers() { cut -d- -f2 <<<"$__DIRECT_APKNAME__"; }
+get_direct_vers() {
+	if _direct_is_map "$__DIRECT_SPEC__"; then
+		local entry
+		local -a entries
+		read -ra entries <<<"$__DIRECT_SPEC__"
+		for entry in "${entries[@]}"; do echo "${entry%%=*}"; done
+	else
+		cut -d- -f2 <<<"$__DIRECT_APKNAME__"
+	fi
+}
 get_direct_pkg_name() { cut -d- -f1 <<<"$__DIRECT_APKNAME__"; }
-get_direct_resp() { __DIRECT_APKNAME__=$(awk -F/ '{print $NF}' <<<"$1"); }
+get_direct_resp() {
+	__DIRECT_SPEC__=$1
+	if _direct_is_map "$1"; then
+		__DIRECT_APKNAME__=""
+	else
+		__DIRECT_APKNAME__=$(awk -F/ '{print $NF}' <<<"$1")
+	fi
+}
 # -------------------- apkcombo --------------------
 get_apkcombo_resp() {
 	__APKCOMBO_URL__=$1
