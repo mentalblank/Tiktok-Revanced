@@ -6,11 +6,29 @@ enable-magisk-update = false   # set this to false if you do not want to receive
 # you can use rvmm-config-gen to generate a config
 
 [TikTok]
-patches-source = "RookieEnough/De-Vanced"
+# De-Vanced has no tiktok patches at all; icysymmetra is where 'SIM spoof' lives
+patches-source = "icysymmetra/tiktok-patches-for-morphe"
 cli-source = "MorpheApp/morphe-cli"
-rv-brand = "De-Vanced"
+rv-brand = "IcySymmetra"
 build-mode = "apk"
 arch = "both"
-apkmirror-dlurl = "https://apkmirror.com/apk/tiktok-pte-ltd/tik-tok-including-musical-ly/"
+apkmirror-dlurl = "https://www.apkmirror.com/apk/tiktok-pte-ltd/tik-tok-including-musical-ly/"
 uptodown-dlurl = "https://tiktok.en.uptodown.com/android"
+apkcombo-dlurl = "https://apkcombo.com/tiktok/com.zhiliaoapp.musically"
+gplay-dlurl = "com.zhiliaoapp.musically"
 included-patches = "'SIM spoof'"
+
+[TikTok-NexAlloy]
+app-name = "TikTok"
+patcher = "lspatch"
+module-source = "gnadgnaoh/SexAlloy"
+module-version = "v1.0"
+rv-brand = "NexAlloy"
+build-mode = "apk"
+arch = "both"
+# the module hooks at runtime, so it rides on whatever version a mirror has
+version = "latest"
+apkmirror-dlurl = "https://www.apkmirror.com/apk/tiktok-pte-ltd/tik-tok-including-musical-ly/"
+uptodown-dlurl = "https://tiktok.en.uptodown.com/android"
+apkcombo-dlurl = "https://apkcombo.com/tiktok/com.zhiliaoapp.musically"
+gplay-dlurl = "com.zhiliaoapp.musically"

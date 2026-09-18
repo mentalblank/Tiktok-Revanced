@@ -72,14 +72,33 @@ for table_name in $(toml_get_table_names); do
 	fi
 
 	declare -A app_args
-	patches_src=$(toml_get "$t" patches-source) || patches_src=$DEF_PATCHES_SRC
-	patches_ver=$(toml_get "$t" patches-version) || patches_ver=$DEF_PATCHES_VER
-	cli_src=$(toml_get "$t" cli-source) || cli_src=$DEF_CLI_SRC
-	cli_ver=$(toml_get "$t" cli-version) || cli_ver=$DEF_CLI_VER
+	app_args[patcher]=$(toml_get "$t" patcher) || app_args[patcher]="morphe"
+	if ! isoneof "${app_args[patcher]}" morphe lspatch; then
+		abort "ERROR: patcher '${app_args[patcher]}' is not a valid option for '${table_name}': only 'morphe' or 'lspatch' is allowed"
+	fi
+	app_args[lspatch_args]=$(toml_get "$t" lspatch-args) || app_args[lspatch_args]=""
 
-	if ! PREBUILTS="$(get_prebuilts "$cli_src" "$cli_ver" "$patches_src" "$patches_ver")"; then
-		epr "Could not get prebuilts"
-		continue
+	if [ "${app_args[patcher]}" = lspatch ]; then
+		module_src=$(toml_get "$t" module-source) || abort "ERROR: 'module-source' is required when patcher is 'lspatch' ('${table_name}')"
+		module_ver=$(toml_get "$t" module-version) || module_ver="latest"
+		lspatch_src=$(toml_get "$t" lspatch-source) || lspatch_src="JingMatrix/LSPatch"
+		lspatch_ver=$(toml_get "$t" lspatch-version) || lspatch_ver="latest"
+		if ! PREBUILTS="$(get_lspatch_prebuilts "$lspatch_src" "$lspatch_ver" "$module_src" "$module_ver")"; then
+			epr "Could not get lspatch prebuilts"
+			continue
+		fi
+		app_args[src_label]=$module_src
+	else
+		patches_src=$(toml_get "$t" patches-source) || patches_src=$DEF_PATCHES_SRC
+		patches_ver=$(toml_get "$t" patches-version) || patches_ver=$DEF_PATCHES_VER
+		cli_src=$(toml_get "$t" cli-source) || cli_src=$DEF_CLI_SRC
+		cli_ver=$(toml_get "$t" cli-version) || cli_ver=$DEF_CLI_VER
+
+		if ! PREBUILTS="$(get_prebuilts "$cli_src" "$cli_ver" "$patches_src" "$patches_ver")"; then
+			epr "Could not get prebuilts"
+			continue
+		fi
+		app_args[src_label]=$patches_src
 	fi
 	read -r cli_jar patches_jar <<<"$PREBUILTS"
 	app_args[cli]=$cli_jar
@@ -158,8 +177,26 @@ wait
 rm -rf temp/tmp.*
 if [ -z "$(ls -A1 "${BUILD_DIR}")" ]; then abort "All builds failed."; fi
 
-log "\nUse [zygisk-detach](https://github.com/j-hc/zygisk-detach) to detach root the app from Play Store\n"
-log "$(cat "$TEMP_DIR"/*/changelog.md)"
+# a run that built only some of its tables still publishes what it has, but it
+# records the rest so the release and the workflow both show the gap
+: >"${TEMP_DIR}/failures"
+if [ -f "${TEMP_DIR}/expected" ]; then
+	sort -u "${TEMP_DIR}/expected" >"${TEMP_DIR}/expected.s"
+	sort -u "${TEMP_DIR}/built" 2>/dev/null >"${TEMP_DIR}/built.s" || : >"${TEMP_DIR}/built.s"
+	comm -23 "${TEMP_DIR}/expected.s" "${TEMP_DIR}/built.s" >"${TEMP_DIR}/failures" || :
+fi
+if [ -s "${TEMP_DIR}/failures" ]; then
+	log "\nFailed:"
+	while IFS= read -r failed_table; do
+		[ -z "$failed_table" ] && continue
+		log "- ${failed_table}"
+		epr "Did not build: ${failed_table}"
+	done <"${TEMP_DIR}/failures"
+fi
+
+log ""
+# every patch source records the same cli, so keep only its first mention
+log "$(cat "$TEMP_DIR"/*/changelog.md | awk '!(/^CLI: / && seen[$0]++)')"
 
 SKIPPED=$(cat "$TEMP_DIR"/skipped 2>/dev/null || :)
 if [ -n "$SKIPPED" ]; then

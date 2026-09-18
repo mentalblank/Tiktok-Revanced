@@ -5,7 +5,7 @@ CWD=$(pwd)
 TEMP_DIR="temp"
 BIN_DIR="bin"
 BUILD_DIR="build"
-DL_SRCS=("direct" "archive" "apkmirror" "uptodown")
+DL_SRCS=("direct" "archive" "apkcombo" "uptodown" "gplay" "apkmirror")
 
 if [ "${GITHUB_TOKEN-}" ]; then GH_HEADER="Authorization: token ${GITHUB_TOKEN}"; else GH_HEADER=; fi
 NEXT_VER_CODE=${NEXT_VER_CODE:-$(date +'%Y%m%d')}
@@ -52,7 +52,10 @@ abort() {
 	kill -- -$$ 2>/dev/null
 	exit 1
 }
-java() { env -i java --enable-native-access=ALL-UNNAMED "$@"; }
+# env -i strips PATH, so resolve the JDK before it is lost
+JAVA_BIN=${JAVA_HOME:+$JAVA_HOME/bin/java}
+[ -x "${JAVA_BIN:-}" ] || JAVA_BIN=$(type -P java)
+java() { env -i "$JAVA_BIN" --enable-native-access=ALL-UNNAMED "$@"; }
 
 get_prebuilts() {
 	local cli_src=$1 cli_ver=$2 patches_src=$3 patches_ver=$4
@@ -172,8 +175,17 @@ config_update() {
 		t=$(toml_get_table "$table_name")
 		enabled=$(toml_get "$t" enabled) || enabled=true
 		if [ "$enabled" = "false" ]; then continue; fi
-		PATCHES_SRC=$(toml_get "$t" patches-source) || PATCHES_SRC=$DEF_PATCHES_SRC
-		PATCHES_VER=$(toml_get "$t" patches-version) || PATCHES_VER=$DEF_PATCHES_VER
+		PATCHER=$(toml_get "$t" patcher) || PATCHER="morphe"
+		if [ "$PATCHER" = lspatch ]; then
+			# an lspatch table has no patch bundle: the module release is what moves
+			PATCHES_SRC=$(toml_get "$t" module-source) || continue
+			PATCHES_VER=$(toml_get "$t" module-version) || PATCHES_VER="latest"
+			SRC_LABEL="Module"
+		else
+			PATCHES_SRC=$(toml_get "$t" patches-source) || PATCHES_SRC=$DEF_PATCHES_SRC
+			PATCHES_VER=$(toml_get "$t" patches-version) || PATCHES_VER=$DEF_PATCHES_VER
+			SRC_LABEL="Patches"
+		fi
 		if [[ -v sources["$PATCHES_SRC/$PATCHES_VER"] ]]; then
 			if [ "${sources["$PATCHES_SRC/$PATCHES_VER"]}" = 1 ]; then upped+=("$table_name"); fi
 		else
@@ -184,13 +196,17 @@ config_update() {
 			elif [ "$PATCHES_VER" = "latest" ]; then
 				last_patches=$(gh_req "$rv_rel/latest" -) || continue
 			else
-				last_patches=$(gh_req "$rv_rel/tags/${ver}" -) || continue
+				last_patches=$(gh_req "$rv_rel/tags/${PATCHES_VER}" -) || continue
 			fi
-			if ! last_patches=$(jq -e -r '.assets[] | select(.name | (endswith("asc") or endswith("json")) | not) | .name' <<<"$last_patches"); then
+			if [ "$PATCHER" = lspatch ]; then
+				if ! last_patches=$(_pick_asset apk <<<"$last_patches" | jq -e -r .name); then
+					abort "config_update error: no module asset on ${PATCHES_SRC}"
+				fi
+			elif ! last_patches=$(jq -e -r '.assets[] | select(.name | (endswith("asc") or endswith("json")) | not) | .name' <<<"$last_patches"); then
 				abort "config_update error: '$last_patches'"
 			fi
 			if [ "$last_patches" ]; then
-				if ! OP=$(grep "^Patches: ${PATCHES_SRC%%/*}/" build.md | grep -m1 "$last_patches"); then
+				if ! OP=$(grep "^${SRC_LABEL}: ${PATCHES_SRC%%/*}/" build.md | grep -m1 "$last_patches"); then
 					sources["$PATCHES_SRC/$PATCHES_VER"]=1
 					prcfg=true
 					upped+=("$table_name")
@@ -208,6 +224,146 @@ config_update() {
 		done
 		jq "to_entries | map(select(${query} or (.value | type != \"object\"))) | from_entries" <<<"$__TOML__"
 	fi
+}
+
+USER_AGENT="Mozilla/5.0 (X11; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0"
+
+# -------------------- cloudflare solver --------------------
+FS_PORT=${FS_PORT:-8191}
+CFB_PORT=${CFB_PORT:-8000}
+FS_URL=${FS_URL:-http://127.0.0.1:${FS_PORT}/v1}
+CFB_URL=${CFB_URL:-http://127.0.0.1:${CFB_PORT}/html}
+FS_IMAGE=${FS_IMAGE:-ghcr.io/flaresolverr/flaresolverr:latest}
+CFB_IMAGE=${CFB_IMAGE:-ghcr.io/sarperavci/cloudflarebypassforscraping:latest}
+__SOLVER_HTML__="" __SOLVER_COOKIES__="" __SOLVER_UA__=""
+__FS_STATE__=cold __CFB_STATE__=cold
+
+# containers are started on first use, so builds served by a plain source never pay for them
+_solver_start() {
+	local name=$1 image=$2 port=$3 probe=$4
+	if ! command -v docker >/dev/null 2>&1; then
+		epr "docker is not available, cannot start ${name}"
+		return 1
+	fi
+	# apps build in parallel and share one container, so only one job may start it
+	(
+		flock 9
+		_solver_start_locked "$name" "$image" "$port" "$probe"
+	) 9>"${TEMP_DIR}/${name}.lock"
+}
+
+_solver_start_locked() {
+	local name=$1 image=$2 port=$3 probe=$4 i op
+	if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = true ]; then
+		_solver_wait "$name" "$probe"
+		return
+	fi
+	if docker inspect "$name" >/dev/null 2>&1; then docker rm -f "$name" >/dev/null 2>&1 || :; fi
+	pr "Starting ${name}"
+	if ! op=$(docker run -d --name "$name" -p "127.0.0.1:${port}:${port}" "$image" 2>&1); then
+		epr "could not start ${name}: $(tail -2 <<<"$op")"
+		return 1
+	fi
+	_solver_wait "$name" "$probe"
+}
+
+_solver_wait() {
+	local name=$1 probe=$2 i
+	for ((i = 0; i < 90; i++)); do
+		if curl -s --max-time 5 -o /dev/null "$probe"; then return 0; fi
+		if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" != true ]; then
+			epr "${name} exited: $(docker logs --tail 2 "$name" 2>&1 || :)"
+			return 1
+		fi
+		sleep 2
+	done
+	epr "${name} did not come up"
+	return 1
+}
+
+_fs_get() {
+	local url=$1 resp attempt
+	if [ "$__FS_STATE__" = dead ]; then return 1; fi
+	if [ "$__FS_STATE__" = cold ]; then
+		if _solver_start flaresolverr "$FS_IMAGE" "$FS_PORT" "${FS_URL%/v1}/"; then
+			__FS_STATE__=ready
+		else
+			__FS_STATE__=dead
+			return 1
+		fi
+	fi
+	for attempt in 1 2 3; do
+		resp=$(curl -s -X POST "$FS_URL" -H 'Content-Type: application/json' --max-time 180 \
+			-d "$(jq -n --arg u "$url" '{cmd: "request.get", url: $u, maxTimeout: 60000}')") || resp=""
+		if [ "$(jq -r '.status // empty' <<<"$resp" 2>/dev/null)" = ok ]; then
+			__SOLVER_HTML__=$(jq -r '.solution.response // empty' <<<"$resp")
+			__SOLVER_COOKIES__=$(jq -r '[.solution.cookies[]? | .name + "=" + .value] | join("; ")' <<<"$resp")
+			__SOLVER_UA__=$(jq -r '.solution.userAgent // empty' <<<"$resp")
+			if [ "$__SOLVER_HTML__" ]; then return 0; fi
+		fi
+		sleep 5
+	done
+	wpr "FlareSolverr could not fetch ${url}"
+	return 1
+}
+
+_cfb_get() {
+	local url=$1 headers attempt code body
+	if [ "$__CFB_STATE__" = dead ]; then return 1; fi
+	if [ "$__CFB_STATE__" = cold ]; then
+		if _solver_start cloudflarebypass "$CFB_IMAGE" "$CFB_PORT" "${CFB_URL%/html}/"; then
+			__CFB_STATE__=ready
+		else
+			__CFB_STATE__=dead
+			return 1
+		fi
+	fi
+	headers="${TEMP_DIR}/cfb_headers.txt"
+	for attempt in 1 2 3; do
+		body=$(curl -s -G --data-urlencode "url=${url}" --max-time 180 -D "$headers" -w '\n%{http_code}' "$CFB_URL") || continue
+		code=${body##*$'\n'}
+		body=${body%$'\n'*}
+		if [ "$code" = 200 ] && [ "$body" ]; then
+			__SOLVER_HTML__=$body
+			__SOLVER_COOKIES__=$(grep -i '^x-cf-bypasser-cookies:' "$headers" 2>/dev/null | cut -d: -f2- | xargs) || __SOLVER_COOKIES__=""
+			__SOLVER_UA__=$(grep -i '^x-cf-bypasser-user-agent:' "$headers" 2>/dev/null | cut -d: -f2- | xargs) || __SOLVER_UA__=""
+			return 0
+		fi
+	done
+	wpr "cloudflarebypass could not fetch ${url}"
+	return 1
+}
+
+# html through a solver: FlareSolverr first, cloudflarebypass as second chance
+_cf_get() {
+	__SOLVER_HTML__=""
+	_fs_get "$1" && return 0
+	_cfb_get "$1"
+}
+
+# binary download carrying whatever cookies and user agent the solver handed back
+cf_dl() {
+	local url=$1 op=$2 referer=${3:-} attempt dlp
+	if [ -f "$op" ]; then return 0; fi
+	dlp="$(dirname "$op")/tmp.$(basename "$op")"
+	# clearance can lapse between solving the page and fetching the file, so a
+	# rejected download is retried once against a freshly solved referer
+	for attempt in 1 2; do
+		local cargs=(-L --fail -s -S --connect-timeout 10 --retry 2 --max-time 1800
+			-H "User-Agent: ${__SOLVER_UA__:-$USER_AGENT}")
+		if [ "$__SOLVER_COOKIES__" ]; then cargs+=(-H "Cookie: ${__SOLVER_COOKIES__}"); fi
+		if [ "$referer" ]; then cargs+=(-H "Referer: ${referer}"); fi
+		if curl "${cargs[@]}" -o "$dlp" "$url"; then
+			mv -f "$dlp" "$op"
+			return 0
+		fi
+		if [ "$attempt" = 1 ] && [ "$referer" ]; then
+			wpr "Download rejected, re-solving ${referer}"
+			_cf_get "$referer" >/dev/null || :
+		fi
+	done
+	epr "Request failed: $url"
+	return 1
 }
 
 _req() {
@@ -230,7 +386,7 @@ _req() {
 		mv -f "$dlp" "$op"
 	fi
 }
-req() { _req "$1" "$2" -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0"; }
+req() { _req "$1" "$2" -H "User-Agent: ${USER_AGENT}"; }
 gh_req() { _req "$1" "$2" -H "$GH_HEADER"; }
 gh_dl() {
 	if [ ! -f "$1" ]; then
@@ -279,7 +435,7 @@ get_patch_last_supported_ver() {
 	if [ -z "$pcount" ]; then
 		abort "No patches found for '$pkg_name' in patches '$patches_jar'"
 	fi
-	grep -F "($pcount patch" <<<"$op" | sed 's/ (.* patch.*//' | get_highest_ver || return 1
+	grep -F "($pcount patch" <<<"$op" | awk '{print $1}' | get_highest_ver || return 1
 }
 
 patches_list_versions() {
@@ -334,7 +490,7 @@ merge_splits() {
 		return 1
 	fi
 	# sign the merged stock apk
-	if ! OP=$(java -jar "$APKSIGNER" sign --ks ks-p12.keystore --ks-pass pass:123456789 --key-pass pass:123456789 --ks-key-alias jhc \
+	if ! OP=$(java -jar "$APKSIGNER" sign --ks ks.p12 --ks-pass pass:123456789 --key-pass pass:123456789 --ks-key-alias jhc \
 		--out "${output}" "${output}-unsigned"); then
 		epr "apksigner error: $OP"
 		return 1
@@ -392,7 +548,8 @@ dl_apkmirror() {
 	apkmname=$($HTMLQ "h1.marginZero" --text <<<"$__APKMIRROR_RESP__")
 	apkmname="${apkmname,,}" apkmname="${apkmname// /-}" apkmname="${apkmname//[^a-z0-9-]/}"
 	url="${url}/${apkmname}-${version//./-}-release/"
-	resp=$(req "$url" -) || return 1
+	_cf_get "$url" || return 1
+	resp=$__SOLVER_HTML__
 	node=$($HTMLQ "div.table-row.headerFont:nth-last-child(1)" -r "span:nth-child(n+3)" <<<"$resp")
 	if [ "$node" ]; then
 		for type in APK BUNDLE; do
@@ -404,21 +561,33 @@ dl_apkmirror() {
 			fi
 		done
 		if [ -z "$dlurl" ]; then return 1; fi
-		resp=$(req "$dlurl" -)
+		_cf_get "$dlurl" || return 1
+		resp=$__SOLVER_HTML__
 	fi
 	url=$(echo "$resp" | $HTMLQ --base https://www.apkmirror.com --attribute href "a.btn") || return 1
-	url=$(req "$url" - | $HTMLQ --base https://www.apkmirror.com --attribute href "span > a[rel = nofollow]") || return 1
+	local keypage=$url
+	_cf_get "$url" || return 1
+	url=$($HTMLQ --base https://www.apkmirror.com --attribute href "span > a[rel = nofollow]" <<<"$__SOLVER_HTML__") || return 1
 
+	# parallel arch jobs hammering apkmirror get themselves blocked, so the
+	# actual file transfers are taken one at a time
 	if [ "$is_bundle" = true ]; then
-		req "$url" "${output}.apkm" || return 1
+		(
+			flock 9
+			cf_dl "$url" "${output}.apkm" "$keypage"
+		) 9>"${TEMP_DIR}/apkmirror.lock" || return 1
 		merge_splits "${output}.apkm" "${output}"
 	else
-		req "$url" "${output}" || return 1
+		(
+			flock 9
+			cf_dl "$url" "${output}" "$keypage"
+		) 9>"${TEMP_DIR}/apkmirror.lock" || return 1
 	fi
 }
 get_apkmirror_vers() {
 	local vers apkm_resp
-	apkm_resp=$(req "https://www.apkmirror.com/uploads/?appcategory=${__APKMIRROR_CAT__}" -)
+	_cf_get "https://www.apkmirror.com/uploads/?appcategory=${__APKMIRROR_CAT__}" || return 1
+	apkm_resp=$__SOLVER_HTML__
 	vers=$(sed -n 's;.*Version:</span><span class="infoSlide-value">\(.*\) </span>.*;\1;p' <<<"$apkm_resp" | awk '{$1=$1}1')
 	if [ "$__AAV__" = false ]; then
 		local IFS=$'\n'
@@ -434,7 +603,8 @@ get_apkmirror_vers() {
 }
 get_apkmirror_pkg_name() { sed -n 's;.*id=\(.*\)" class="accent_color.*;\1;p' <<<"$__APKMIRROR_RESP__"; }
 get_apkmirror_resp() {
-	__APKMIRROR_RESP__=$(req "${1}" -) || return 1
+	_cf_get "${1}" || return 1
+	__APKMIRROR_RESP__=$__SOLVER_HTML__
 	__APKMIRROR_CAT__="${1##*/}"
 }
 
@@ -511,7 +681,10 @@ dl_archive() {
 		return 0
 	fi
 
-	path=$(grep -m1 "${version_f#v}-${arch// /}" <<<"$__ARCHIVE_RESP__") || return 1
+	# the archive stores most apks as a single -all build, so fall back to that
+	# when there is no file for this specific arch
+	path=$(grep -m1 "${version_f#v}-${arch// /}\." <<<"$__ARCHIVE_RESP__") ||
+		path=$(grep -m1 "${version_f#v}-all\." <<<"$__ARCHIVE_RESP__") || return 1
 	if [ "${path##*.}" = "apkm" ]; then
 		output_m="${output}.apkm"
 	else
@@ -539,14 +712,151 @@ dl_direct() {
 get_direct_vers() { cut -d- -f2 <<<"$__DIRECT_APKNAME__"; }
 get_direct_pkg_name() { cut -d- -f1 <<<"$__DIRECT_APKNAME__"; }
 get_direct_resp() { __DIRECT_APKNAME__=$(awk -F/ '{print $NF}' <<<"$1"); }
+# -------------------- apkcombo --------------------
+get_apkcombo_resp() {
+	__APKCOMBO_URL__=$1
+	__APKCOMBO_RESP__=$(req "${1}/old-versions/" -) || return 1
+}
+get_apkcombo_pkg_name() { grep -m1 -oE '[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+){2,}' <<<"${__APKCOMBO_URL__##*/}"; }
+get_apkcombo_vers() {
+	grep -oE 'download/phone-[0-9][0-9a-zA-Z.]*-apk' <<<"$__APKCOMBO_RESP__" |
+		sed 's|download/phone-||;s|-apk$||' | awk '!seen[$0]++'
+}
+dl_apkcombo() {
+	local url=$1 version=$2 output=$3 _arch=$4 _dpi=$5
+	local page r2
+	page=$(req "${url}/download/phone-${version}-apk" -) || return 1
+	r2=$($HTMLQ --attribute href 'a[href^="/r2?u="]' <<<"$page") || r2=""
+	r2=${r2%%$'\n'*}
+	if [ -z "$r2" ]; then
+		epr "apkcombo has no download for version '${version}'"
+		return 1
+	fi
+	# the link always ends in .apk, but the file it serves may be a split bundle
+	if [[ ${r2,,} == *xapk* ]]; then
+		req "https://apkcombo.com${r2}" "${output}.apkm" || return 1
+		merge_splits "${output}.apkm" "$output"
+	else
+		req "https://apkcombo.com${r2}" "$output"
+	fi
+}
+
+# -------------------- google play --------------------
+# anonymous Aurora dispenser, so no account is needed. play only ever serves
+# the current version, so this source is skipped for pinned builds
+_gplay_deps() {
+	if python3 -c 'import requests, google.protobuf' >/dev/null 2>&1; then return 0; fi
+	pr "Installing python deps for the play downloader"
+	python3 -m pip install --quiet --user requests protobuf PySocks >/dev/null 2>&1 || {
+		epr "could not install python deps for gplay"
+		return 1
+	}
+}
+get_gplay_resp() {
+	__GPLAY_PKG__="${1##*/}"
+	command -v python3 >/dev/null 2>&1
+}
+get_gplay_pkg_name() { echo "$__GPLAY_PKG__"; }
+get_gplay_vers() { :; }
+dl_gplay() {
+	local pkg=$1 _version=$2 output=$3 _arch=$4 _dpi=$5 get_latest=${6:-false}
+	local helper="${BIN_DIR}/ggplay_dl/ggplay_dl.py" op js
+	if [ "$get_latest" != true ]; then
+		epr "gplay only serves the current version"
+		return 1
+	fi
+	if [ ! -f "$helper" ]; then
+		epr "gplay helper is missing: $helper"
+		return 1
+	fi
+	_gplay_deps || return 1
+	if ! op=$(python3 "$helper" "${pkg##*/}" "$output" 2>&1); then
+		epr "gplay: $(grep -v '^[{}]' <<<"$op" | tail -2)"
+		return 1
+	fi
+	js=$(grep '^{' <<<"$op" | tail -1)
+	if ! jq -e '.success == true' <<<"$js" >/dev/null 2>&1; then
+		epr "gplay: $(jq -r '.error // "unknown error"' <<<"$js" 2>/dev/null)"
+		return 1
+	fi
+	if [ "$(jq -r '.isSplit // false' <<<"$js")" = true ]; then
+		mv -f "$output" "${output}.apkm"
+		merge_splits "${output}.apkm" "$output" || return 1
+	fi
+}
+
 # --------------------------------------------------
+
+# picks one asset off a github release json: preferring a non-root, non-debug build
+_pick_asset() {
+	local kind=$1
+	if [ "$kind" = jar ]; then
+		jq -e -r '[.assets[] | select(.name | endswith(".jar"))]
+			| (map(select(.name | test("debug") | not)) + .) | .[0]'
+	else
+		jq -e -r '[.assets[] | select(.name | endswith(".apk"))]
+			| (map(select(.name | test("nonroot"))) + map(select(.name | test("root|debug") | not)) + .) | .[0]'
+	fi
+}
+
+_gh_asset_dl() {
+	local src=$1 ver=$2 dir=$3 kind=$4
+	local rel="https://api.github.com/repos/${src}/releases" resp asset url name
+	if [ "$ver" = latest ]; then rel+="/latest"; else rel+="/tags/${ver}"; fi
+	resp=$(gh_req "$rel" -) || return 1
+	asset=$(_pick_asset "$kind" <<<"$resp") || return 1
+	url=$(jq -r .url <<<"$asset") name=$(jq -r .name <<<"$asset")
+	if [ "$name" = null ] || [ -z "$name" ]; then
+		epr "no ${kind} asset on ${src} ${ver}"
+		return 1
+	fi
+	gh_dl "${dir}/${name}" "$url" >&2 || return 1
+	echo "${dir}/${name}"
+}
+
+# lspatch embeds an xposed module into a stock apk, so there are no patch
+# bundles here: just the patcher jar and the module apk
+get_lspatch_prebuilts() {
+	local lspatch_src=$1 lspatch_ver=$2 module_src=$3 module_ver=$4
+	local dir=${TEMP_DIR}/lspatch-rv jar module
+	pr "Getting prebuilts (${module_src%/*})" >&2
+	[ -d "$dir" ] || mkdir -p "$dir"
+	jar=$(_gh_asset_dl "$lspatch_src" "$lspatch_ver" "$dir" jar) || return 1
+	module=$(_gh_asset_dl "$module_src" "$module_ver" "$dir" apk) || return 1
+	echo "LSPatch: $(cut -d/ -f1 <<<"$lspatch_src")/$(basename "$jar")  " >>"${dir}/changelog.md"
+	echo "Module: $(cut -d/ -f1 <<<"$module_src")/$(basename "$module")  " >>"${dir}/changelog.md"
+	echo "$jar $module"
+}
+
+lspatch_apk() {
+	local stock_input=$1 patched_apk=$2 lspatch_jar=$3 module_apk=$4 extra_args=${5:-}
+	local outdir out
+	outdir="$(pwd)/$(mktemp -d -p "$TEMP_DIR")"
+	# lspatch needs pkcs12; ks.p12 holds the same key as ks.keystore
+	local cmd="java -jar '$lspatch_jar' '$stock_input' -k ks.p12 123456789 jhc 123456789 \
+-m '$module_apk' --injectdex -l 3 -f -o '$outdir' $extra_args"
+	pr "$cmd"
+	if ! eval "$cmd"; then
+		rm -rf "$outdir"
+		return 1
+	fi
+	out=$(find "$outdir" -name '*-lspatched.apk' -type f)
+	out=${out%%$'\n'*}
+	if [ -z "$out" ]; then
+		epr "lspatch produced no output"
+		rm -rf "$outdir"
+		return 1
+	fi
+	mv -f "$out" "$patched_apk"
+	rm -rf "$outdir"
+}
 
 patch_apk() {
 	local stock_input=$1 patched_apk=$2 patcher_args=$3 cli_jar=$4 patches_jar=$5
 	local tmp_files
 	tmp_files="$(pwd)/$(mktemp -d -p "$TEMP_DIR")"
 
-	local cmd="java -jar '$cli_jar' patch '$stock_input' --purge -o '$patched_apk' -p '$patches_jar' --keystore=ks.keystore \
+	local cmd="java -jar '$cli_jar' patch '$stock_input' -o '$patched_apk' -p '$patches_jar' --keystore=ks.keystore \
 --keystore-entry-password=123456789 --keystore-password=123456789 --signer=jhc --keystore-entry-alias=jhc -t '$tmp_files' $patcher_args"
 
 	# TODO: remove this later
@@ -574,6 +884,7 @@ check_sig() {
 
 build_rv() {
 	eval "declare -A args=${1#*=}"
+	echo "${args[table]}" >>"${TEMP_DIR}/expected"
 	local version="" pkg_name=""
 	local mode_arg=${args[build_mode]} version_mode=${args[version]}
 	local app_name=${args[app_name]}
@@ -611,21 +922,30 @@ build_rv() {
 		return 0
 	fi
 	pr "Package name of '${table}' is '$pkg_name'"
-	local list_patches
-	list_patches=$(patches_list "$cli_jar" "$patches_jar" "$pkg_name") || return 1
+	local list_patches=""
 	local get_latest_ver=false
-	if [ "$version_mode" = auto ]; then
-		if ! version=$(get_patch_last_supported_ver "$list_patches" "$pkg_name" \
-			"${args[included_patches]}" "${args[excluded_patches]}" "${args[exclusive_patches]}"); then
-			epr "get_patch_last_supported_ver failed '$list_patches'"
-			return
-		elif [ -z "$version" ]; then get_latest_ver=true; fi
-	elif isoneof "$version_mode" latest beta; then
-		get_latest_ver=true
-		p_patcher_args+=("-f")
+	if [ "${args[patcher]}" = lspatch ]; then
+		# the module hooks at runtime, so any version of the app will do
+		if isoneof "$version_mode" auto latest beta; then
+			get_latest_ver=true
+		else
+			version=$version_mode
+		fi
 	else
-		version=$version_mode
-		p_patcher_args+=("-f")
+		list_patches=$(patches_list "$cli_jar" "$patches_jar" "$pkg_name") || return 1
+		if [ "$version_mode" = auto ]; then
+			if ! version=$(get_patch_last_supported_ver "$list_patches" "$pkg_name" \
+				"${args[included_patches]}" "${args[excluded_patches]}" "${args[exclusive_patches]}"); then
+				epr "get_patch_last_supported_ver failed '$list_patches'"
+				return
+			elif [ -z "$version" ]; then get_latest_ver=true; fi
+		elif isoneof "$version_mode" latest beta; then
+			get_latest_ver=true
+			p_patcher_args+=("-f")
+		else
+			version=$version_mode
+			p_patcher_args+=("-f")
+		fi
 	fi
 	if [ $get_latest_ver = true ]; then
 		if [ "$version_mode" = beta ]; then __AAV__="true"; else __AAV__="false"; fi
@@ -688,10 +1008,12 @@ build_rv() {
 			return 0
 		fi
 	fi
-	log "${table}: ${version}"
+	log "${table} [${args[src_label]}]: ${version}"
 
-	local microg_patch
-	microg_patch=$(grep "^Name: " <<<"$list_patches" | grep -i "gmscore\|microg" || :) microg_patch=${microg_patch#*: }
+	local microg_patch=""
+	if isoneof "$pkg_name" com.google.android.youtube com.google.android.apps.youtube.music; then
+		microg_patch=$(grep "^Name: " <<<"$list_patches" | grep -i "gmscore\|microg" || :) microg_patch=${microg_patch#*: }
+	fi
 	if [ -n "$microg_patch" ] && [[ ${p_patcher_args[*]} =~ $microg_patch ]]; then
 		wpr "You cant include/exclude microg patch as that's done by rvmm builder automatically."
 		p_patcher_args=("${p_patcher_args[@]//-[ei] ${microg_patch}/}")
@@ -737,7 +1059,12 @@ build_rv() {
 
 		local apk_output="${BUILD_DIR}/${app_name_l}-${rv_brand_f}-v${version_f}-${arch_f}.apk"
 		if [ "${NORB:-}" != true ] || { [ ! -f "$patched_apk" ] && [ ! -f "$apk_output" ]; }; then
-			if ! patch_apk "$stock_apk_to_patch" "$patched_apk" "${patcher_args[*]}" "${args[cli]}" "${args[ptjar]}"; then
+			if [ "${args[patcher]}" = lspatch ]; then
+				if ! lspatch_apk "$stock_apk_to_patch" "$patched_apk" "${args[cli]}" "${args[ptjar]}" "${args[lspatch_args]}"; then
+					epr "Building '${table}' failed!"
+					return 0
+				fi
+			elif ! patch_apk "$stock_apk_to_patch" "$patched_apk" "${patcher_args[*]}" "${args[cli]}" "${args[ptjar]}"; then
 				epr "Building '${table}' failed!"
 				return 0
 			fi
@@ -747,6 +1074,7 @@ build_rv() {
 			if [ "${NORB:-}" != true ] || { [ ! -f "$patched_apk" ] && [ ! -f "$apk_output" ]; }; then
 				mv -f "$patched_apk" "$apk_output"
 			fi
+			echo "$table" >>"${TEMP_DIR}/built"
 			pr "Built ${table} (non-root): '${apk_output}'"
 			continue
 		fi
@@ -796,6 +1124,7 @@ build_rv() {
 		pushd >/dev/null "$base_template" || abort "Module template dir not found"
 		zip -"$COMPRESSION_LEVEL" -FSqr "${CWD}/${BUILD_DIR}/${module_output}" .
 		popd >/dev/null || :
+		echo "$table" >>"${TEMP_DIR}/built"
 		pr "Built ${table} (root): '${BUILD_DIR}/${module_output}'"
 	done
 }
